@@ -20,6 +20,7 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteException;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -70,30 +71,40 @@ public class SavedWallpaperImages extends BaseAdapter implements ListAdapter {
 
     public void loadThumbnailsAndImageIdList() {
         mImages = new ArrayList<SavedWallpaperTile>();
-        SQLiteDatabase db = mDb.getReadableDatabase();
-        Cursor result = db.query(ImageDb.TABLE_NAME,
-                new String[] { ImageDb.COLUMN_ID,
-                    ImageDb.COLUMN_IMAGE_THUMBNAIL_FILENAME,
-                    ImageDb.COLUMN_IMAGE_FILENAME}, // cols to return
-                null, // select query
-                null, // args to select query
-                null,
-                null,
-                ImageDb.COLUMN_ID + " DESC",
-                null);
+        Cursor result = null;
+        try {
+            SQLiteDatabase db = mDb.getReadableDatabase();
+            result = db.query(ImageDb.TABLE_NAME,
+                    new String[] { ImageDb.COLUMN_ID,
+                            ImageDb.COLUMN_IMAGE_THUMBNAIL_FILENAME,
+                            ImageDb.COLUMN_IMAGE_FILENAME}, // cols to return
+                    null, // select query
+                    null, // args to select query
+                    null,
+                    null,
+                    ImageDb.COLUMN_ID + " DESC",
+                    null);
 
-        while (result.moveToNext()) {
-            String filename = result.getString(1);
-            File file = new File(mContext.getFilesDir(), filename);
+            while (result.moveToNext()) {
+                String filename = result.getString(1);
+                File file = new File(mContext.getFilesDir(), filename);
 
-            Bitmap thumb = BitmapFactory.decodeFile(file.getAbsolutePath());
-            if (thumb != null) {
-                mImages.add(new SavedWallpaperTile(result.getInt(0),
-                        new File(mContext.getFilesDir(), result.getString(2)),
-                        new BitmapDrawable(thumb)));
+                Bitmap thumb = BitmapFactory.decodeFile(file.getAbsolutePath());
+                if (thumb != null) {
+                    mImages.add(new SavedWallpaperTile(result.getInt(0),
+                            new File(mContext.getFilesDir(), result.getString(2)),
+                            new BitmapDrawable(thumb)));
+                }
+            }
+            result.close();
+        }catch (SQLiteException e){
+            e.printStackTrace();
+        }finally {
+            if (result != null){
+                result.close();
             }
         }
-        result.close();
+
     }
 
     public int getCount() {
@@ -118,25 +129,33 @@ public class SavedWallpaperImages extends BaseAdapter implements ListAdapter {
     }
 
     private Pair<String, String> getImageFilenames(int id) {
-        SQLiteDatabase db = mDb.getReadableDatabase();
-        Cursor result = db.query(ImageDb.TABLE_NAME,
-                new String[] { ImageDb.COLUMN_IMAGE_THUMBNAIL_FILENAME,
-                    ImageDb.COLUMN_IMAGE_FILENAME }, // cols to return
-                ImageDb.COLUMN_ID + " = ?", // select query
-                new String[] { Integer.toString(id) }, // args to select query
-                null,
-                null,
-                null,
-                null);
-        if (result.getCount() > 0) {
-            result.moveToFirst();
-            String thumbFilename = result.getString(0);
-            String imageFilename = result.getString(1);
-            result.close();
-            return new Pair<String, String>(thumbFilename, imageFilename);
-        } else {
-            return null;
+        Cursor result = null;
+        try {
+            SQLiteDatabase db = mDb.getReadableDatabase();
+            result = db.query(ImageDb.TABLE_NAME,
+                    new String[] { ImageDb.COLUMN_IMAGE_THUMBNAIL_FILENAME,
+                            ImageDb.COLUMN_IMAGE_FILENAME }, // cols to return
+                    ImageDb.COLUMN_ID + " = ?", // select query
+                    new String[] { Integer.toString(id) }, // args to select query
+                    null,
+                    null,
+                    null,
+                    null);
+
+        }catch (SQLiteException e){
+            e.printStackTrace();
+        }finally {
+            if (result != null && result.getCount() > 0) {
+                result.moveToFirst();
+                String thumbFilename = result.getString(0);
+                String imageFilename = result.getString(1);
+                result.close();
+                return new Pair<String, String>(thumbFilename, imageFilename);
+            } else {
+                return null;
+            }
         }
+
     }
 
     public void deleteImage(int id) {
@@ -145,12 +164,17 @@ public class SavedWallpaperImages extends BaseAdapter implements ListAdapter {
         imageFile.delete();
         File thumbFile = new File(mContext.getFilesDir(), filenames.second);
         thumbFile.delete();
-        SQLiteDatabase db = mDb.getWritableDatabase();
-        db.delete(ImageDb.TABLE_NAME,
-                ImageDb.COLUMN_ID + " = ?", // SELECT query
-                new String[] {
-                    Integer.toString(id) // args to SELECT query
-                });
+        try {
+            SQLiteDatabase db = mDb.getWritableDatabase();
+            db.delete(ImageDb.TABLE_NAME,
+                    ImageDb.COLUMN_ID + " = ?", // SELECT query
+                    new String[] {
+                            Integer.toString(id) // args to SELECT query
+                    });
+        } catch (SQLiteException e){
+            Log.e(TAG, "Failed delete images from db " + e);
+        }
+
     }
 
     public void writeImage(Bitmap thumbnail, byte[] imageBytes) {
@@ -174,6 +198,8 @@ public class SavedWallpaperImages extends BaseAdapter implements ListAdapter {
             db.insert(ImageDb.TABLE_NAME, null, values);
         } catch (IOException e) {
             Log.e(TAG, "Failed writing images to storage " + e);
+        } catch (SQLiteException e){
+            Log.e(TAG, "Failed writing images to db " + e);
         }
     }
 
