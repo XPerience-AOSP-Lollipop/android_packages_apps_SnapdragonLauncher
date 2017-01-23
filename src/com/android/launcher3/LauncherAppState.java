@@ -104,12 +104,6 @@ public class LauncherAppState {
 
         sContext.registerReceiver(mModel, filter);
         UserManagerCompat.getInstance(sContext).enableAndResetCache();
-
-        filter = new IntentFilter();
-        if (Utilities.isUnreadCountEnabled(sContext)) {
-            filter.addAction(LauncherModel.ACTION_UNREAD_CHANGED);
-            sContext.registerReceiver(mModel, filter);
-        }
     }
 
     /**

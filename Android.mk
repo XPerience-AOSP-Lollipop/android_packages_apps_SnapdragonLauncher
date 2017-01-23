@@ -30,7 +30,8 @@ LOCAL_STATIC_JAVA_LIBRARIES := \
 LOCAL_SRC_FILES := $(call all-java-files-under, src) \
     $(call all-java-files-under, WallpaperPicker/src) \
     $(call all-proto-files-under, protos)
-LOCAL_SRC_FILES += src/com/qti/launcherunreadservice/IGetUnreadNumber.aidl
+LOCAL_SRC_FILES += src/com/qti/launcherunreadservice/IGetUnreadNumber.aidl \
+                   src/com/qti/launcherunreadservice/IUnreadNumberCallback.aidl
 
 LOCAL_RESOURCE_DIR := $(LOCAL_PATH)/WallpaperPicker/res \
     $(LOCAL_PATH)/res \

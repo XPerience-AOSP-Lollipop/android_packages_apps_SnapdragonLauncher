@@ -28,18 +28,22 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.Intent.ShortcutIconResource;
 import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.content.pm.ProviderInfo;
 import android.content.pm.ResolveInfo;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.net.Uri;
+import android.os.Binder;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.IBinder;
 import android.os.Looper;
 import android.os.Parcelable;
 import android.os.Process;
+import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.TransactionTooLargeException;
 import android.provider.BaseColumns;
@@ -80,6 +84,9 @@ import java.util.Map.Entry;
 import java.util.Set;
 
 import org.codeaurora.snaplauncher.R;
+
+import com.qti.launcherunreadservice.IGetUnreadNumber;
+import com.qti.launcherunreadservice.IUnreadNumberCallback;
 
 /**
  * Maintains in-memory state of the Launcher. It is expected that there should be only one
@@ -178,32 +185,15 @@ public class LauncherModel extends BroadcastReceiver
 
     // </ only access in worker thread >
 
-    public static final String ACTION_UNREAD_CHANGED =
-            "com.android.launcher.action.UNREAD_CHANGED";
-    private static final String EXTRA_COMPONENT_NAME = "component_name";
-    private static final String EXTRA_UNREAD_NUMBER = "unread_number";
+    private static final String LAUNCHER_UNREAD_SERVICE_PACKAGENAME =
+            "com.qti.launcherunreadservice";
+    private static final String LAUNCHER_UNREAD_SERVICE_CLASSNAME =
+            "com.qti.launcherunreadservice.LauncherUnreadService";
 
     @Thunk IconCache mIconCache;
 
     @Thunk final LauncherAppsCompat mLauncherApps;
     @Thunk final UserManagerCompat mUserManager;
-
-    private Map mUnreadMap = new HashMap<ComponentName, Integer>();
-    public void setUnreadMap(Map unreadAppMap) {
-        mUnreadMap = unreadAppMap;
-    }
-
-    public Map getUnreadMap() {
-        return mUnreadMap;
-    }
-
-    public int getUnreadNumberOfComponent(ComponentName componentName) {
-        int unreadNum = -1;
-        if((mUnreadMap != null) && mUnreadMap.containsKey(componentName)){
-            unreadNum = (int) mUnreadMap.get(componentName);
-        }
-        return unreadNum;
-    }
 
     public interface Callbacks {
         public boolean setLoadOnResume();
@@ -238,6 +228,9 @@ public class LauncherModel extends BroadcastReceiver
 
     private HashMap<ComponentName, UnreadInfo> mUnreadChangedMap =
             new HashMap<ComponentName, LauncherModel.UnreadInfo>();
+    private Map mUnreadMap = new HashMap<ComponentName, Integer>();
+    private IGetUnreadNumber mUnreadNumberService;
+    private IBinder mToken = new Binder();
 
     private class UnreadInfo {
         ComponentName mComponentName;
@@ -247,6 +240,18 @@ public class LauncherModel extends BroadcastReceiver
             mComponentName = componentName;
             mUnreadNum = unreadNum;
         }
+    }
+
+    public Map getUnreadMap() {
+        return mUnreadMap;
+    }
+
+    public int getUnreadNumberOfComponent(ComponentName componentName) {
+        int unreadNum = -1;
+        if((mUnreadMap != null) && mUnreadMap.containsKey(componentName)){
+            unreadNum = (int) mUnreadMap.get(componentName);
+        }
+        return unreadNum;
     }
 
     private class UnreadNumberChangeTask implements Runnable {
@@ -324,6 +329,37 @@ public class LauncherModel extends BroadcastReceiver
     }
 
     private UnreadNumberChangeTask mUnreadUpdateTask = new UnreadNumberChangeTask();
+
+    private IUnreadNumberCallback.Stub mUnreadNumberCallback = new IUnreadNumberCallback.Stub(){
+
+        @Override
+        public void onUnreadNumberChanged(ComponentName componentName, int unreadNum){
+            if (componentName == null) return;
+            postUnreadTask(componentName, unreadNum);
+        }
+    };
+
+    private ServiceConnection mConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder service) {
+            mUnreadNumberService = IGetUnreadNumber.Stub.asInterface(service);
+            try {
+                if(mUnreadNumberService != null){
+                    Log.d(TAG,"LauncherModel Unread Service onServiceConnected");
+                    mUnreadMap = mUnreadNumberService.GetUnreadNumber();
+                    mUnreadNumberService.registerUnreadNumberCallback(mToken,
+                            mUnreadNumberCallback);
+                }
+            } catch (RemoteException ex) {
+                Log.e(TAG,"exception "+ex.toString());
+            }
+            updateUnreadIcon(mUnreadMap);
+        }
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            mUnreadNumberService = null;
+        }
+    };
 
     public interface ItemInfoFilter {
         public boolean filterItem(ItemInfo parent, ItemInfo info, ComponentName cn);
@@ -1305,6 +1341,61 @@ public class LauncherModel extends BroadcastReceiver
         }
     }
 
+    private void updateUnreadIcon(Map unreadMap) {
+        Iterator iter = unreadMap.entrySet().iterator();
+        while (iter.hasNext()) {
+            Map.Entry entry = (Map.Entry) iter.next();
+            ComponentName componentName = (ComponentName) entry.getKey();
+            int unreadNumber = (int) entry.getValue();
+            postUnreadTask(componentName, unreadNumber);
+        }
+    }
+
+    private void postUnreadTask(ComponentName componentName, int unreadNum) {
+        mUnreadMap.put(componentName, unreadNum);
+        synchronized (mUnreadChangedMap) {
+            mUnreadChangedMap.put(componentName, new UnreadInfo(componentName, unreadNum));
+        }
+        sWorker.removeCallbacks(mUnreadUpdateTask);
+        sWorker.post(mUnreadUpdateTask);
+    }
+
+    /**
+     * bind unread number service if service is not connected when onResume
+     */
+    public void bindUnreadService(){
+        if (Utilities.isUnreadCountEnabled(mApp.getContext())
+                && mUnreadNumberService == null) {
+            Intent intent = new Intent();
+            ComponentName componentName = new ComponentName(LAUNCHER_UNREAD_SERVICE_PACKAGENAME,
+                    LAUNCHER_UNREAD_SERVICE_CLASSNAME);
+            intent.setComponent(componentName);
+
+            Intent requestIntent = Utilities.
+                    createExplicitFromImplicitIntent(mApp.getContext(), intent);
+            if (requestIntent != null) {
+                final Intent eIntent = new Intent(requestIntent);
+                mApp.getContext().bindService(eIntent, mConnection, Context.BIND_AUTO_CREATE);
+            }
+        }
+    }
+
+    /**
+     * unbind unread number service when Launcher Activity is destroyed.
+     */
+    public void unbindUnreadService(){
+        if (mUnreadNumberService != null){
+            sWorker.removeCallbacks(mUnreadUpdateTask);
+            try{
+                mUnreadNumberService.unRegisterUnreadNumberCallback(mToken);
+                mApp.getContext().unbindService(mConnection);
+            }catch (Exception e){
+                Log.e(TAG,"exception == "+e.toString());
+            }
+            mUnreadNumberService = null;
+        }
+    }
+
     @Override
     public void onPackageChanged(String packageName, UserHandleCompat user) {
         int op = PackageUpdatedTask.OP_UPDATE;
@@ -1376,22 +1467,7 @@ public class LauncherModel extends BroadcastReceiver
                 || LauncherAppsCompat.ACTION_MANAGED_PROFILE_REMOVED.equals(action)) {
             UserManagerCompat.getInstance(context).enableAndResetCache();
             forceReload();
-        } else if (ACTION_UNREAD_CHANGED.equals(action)) {
-            ComponentName componentName = intent.getParcelableExtra(EXTRA_COMPONENT_NAME);
-            int unreadNum = intent.getIntExtra(EXTRA_UNREAD_NUMBER, 0);
-
-            if (componentName == null) return;
-            postUnreadTask(componentName, unreadNum);
         }
-    }
-
-    public void postUnreadTask(ComponentName componentName, int unreadNum) {
-        mUnreadMap.put(componentName, unreadNum);
-        synchronized (mUnreadChangedMap) {
-            mUnreadChangedMap.put(componentName, new UnreadInfo(componentName, unreadNum));
-        }
-        sWorker.removeCallbacks(mUnreadUpdateTask);
-        sWorker.post(mUnreadUpdateTask);
     }
 
     void forceReload() {
