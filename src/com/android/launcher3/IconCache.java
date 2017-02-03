@@ -28,6 +28,7 @@ import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.res.Resources;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteException;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -54,7 +55,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
 import java.util.Stack;
 import org.codeaurora.snaplauncher.R;
@@ -245,8 +245,7 @@ public class IconCache {
     public synchronized void removeIconsForPkg(String packageName, UserHandleCompat user) {
         removeFromMemCacheLocked(packageName, user);
         long userSerial = mUserManager.getSerialNumberForUser(user);
-        mIconDb.getWritableDatabase().delete(IconDB.TABLE_NAME,
-                IconDB.COLUMN_COMPONENT + " LIKE ? AND " + IconDB.COLUMN_USER + " = ?",
+        deleteFromDB(IconDB.COLUMN_COMPONENT + " LIKE ? AND " + IconDB.COLUMN_USER + " = ?",
                 new String[] {packageName + "/%", Long.toString(userSerial)});
     }
 
@@ -290,58 +289,64 @@ public class IconCache {
             componentMap.put(app.getComponentName(), app);
         }
 
-        Cursor c = mIconDb.getReadableDatabase().query(IconDB.TABLE_NAME,
-                new String[] {IconDB.COLUMN_ROWID, IconDB.COLUMN_COMPONENT,
-                    IconDB.COLUMN_LAST_UPDATED, IconDB.COLUMN_VERSION,
-                    IconDB.COLUMN_SYSTEM_STATE},
-                IconDB.COLUMN_USER + " = ? ",
-                new String[] {Long.toString(userSerial)},
-                null, null, null);
-
-        final int indexComponent = c.getColumnIndex(IconDB.COLUMN_COMPONENT);
-        final int indexLastUpdate = c.getColumnIndex(IconDB.COLUMN_LAST_UPDATED);
-        final int indexVersion = c.getColumnIndex(IconDB.COLUMN_VERSION);
-        final int rowIndex = c.getColumnIndex(IconDB.COLUMN_ROWID);
-        final int systemStateIndex = c.getColumnIndex(IconDB.COLUMN_SYSTEM_STATE);
-
         HashSet<Integer> itemsToRemove = new HashSet<Integer>();
         Stack<LauncherActivityInfoCompat> appsToUpdate = new Stack<>();
+        Cursor c = null;
+        try {
+            c = mIconDb.getReadableDatabase().query(IconDB.TABLE_NAME,
+                    new String[]{IconDB.COLUMN_ROWID, IconDB.COLUMN_COMPONENT,
+                            IconDB.COLUMN_LAST_UPDATED, IconDB.COLUMN_VERSION,
+                            IconDB.COLUMN_SYSTEM_STATE},
+                    IconDB.COLUMN_USER + " = ? ",
+                    new String[]{Long.toString(userSerial)},
+                    null, null, null);
 
-        while (c.moveToNext()) {
-            String cn = c.getString(indexComponent);
-            ComponentName component = ComponentName.unflattenFromString(cn);
-            PackageInfo info = pkgInfoMap.get(component.getPackageName());
-            if (info == null) {
-                if (!ignorePackages.contains(component.getPackageName())) {
+            final int indexComponent = c.getColumnIndex(IconDB.COLUMN_COMPONENT);
+            final int indexLastUpdate = c.getColumnIndex(IconDB.COLUMN_LAST_UPDATED);
+            final int indexVersion = c.getColumnIndex(IconDB.COLUMN_VERSION);
+            final int rowIndex = c.getColumnIndex(IconDB.COLUMN_ROWID);
+            final int systemStateIndex = c.getColumnIndex(IconDB.COLUMN_SYSTEM_STATE);
+
+            while (c.moveToNext()) {
+                String cn = c.getString(indexComponent);
+                ComponentName component = ComponentName.unflattenFromString(cn);
+                PackageInfo info = pkgInfoMap.get(component.getPackageName());
+                if (info == null) {
+                    if (!ignorePackages.contains(component.getPackageName())) {
+                        remove(component, user);
+                        itemsToRemove.add(c.getInt(rowIndex));
+                    }
+                    continue;
+                }
+                if ((info.applicationInfo.flags & ApplicationInfo.FLAG_IS_DATA_ONLY) != 0) {
+                    // Application is not present
+                    continue;
+                }
+
+                long updateTime = c.getLong(indexLastUpdate);
+                int version = c.getInt(indexVersion);
+                LauncherActivityInfoCompat app = componentMap.remove(component);
+                if (version == info.versionCode && updateTime == info.lastUpdateTime &&
+                        TextUtils.equals(mSystemState, c.getString(systemStateIndex))) {
+                    continue;
+                }
+                if (app == null) {
                     remove(component, user);
                     itemsToRemove.add(c.getInt(rowIndex));
+                } else {
+                    appsToUpdate.add(app);
                 }
-                continue;
             }
-            if ((info.applicationInfo.flags & ApplicationInfo.FLAG_IS_DATA_ONLY) != 0) {
-                // Application is not present
-                continue;
-            }
-
-            long updateTime = c.getLong(indexLastUpdate);
-            int version = c.getInt(indexVersion);
-            LauncherActivityInfoCompat app = componentMap.remove(component);
-            if (version == info.versionCode && updateTime == info.lastUpdateTime &&
-                    TextUtils.equals(mSystemState, c.getString(systemStateIndex))) {
-                continue;
-            }
-            if (app == null) {
-                remove(component, user);
-                itemsToRemove.add(c.getInt(rowIndex));
-            } else {
-                appsToUpdate.add(app);
+        } catch (SQLiteException e){
+            e.printStackTrace();
+        }finally {
+            if (c!=null){
+                c.close();
             }
         }
-        c.close();
+
         if (!itemsToRemove.isEmpty()) {
-            mIconDb.getWritableDatabase().delete(IconDB.TABLE_NAME,
-                    Utilities.createDbSelectionQuery(IconDB.COLUMN_ROWID, itemsToRemove),
-                    null);
+            deleteFromDB(Utilities.createDbSelectionQuery(IconDB.COLUMN_ROWID, itemsToRemove), null);
         }
 
         // Insert remaining apps.
@@ -371,8 +376,7 @@ public class IconCache {
         values.put(IconDB.COLUMN_USER, userSerial);
         values.put(IconDB.COLUMN_LAST_UPDATED, info.lastUpdateTime);
         values.put(IconDB.COLUMN_VERSION, info.versionCode);
-        mIconDb.getWritableDatabase().insertWithOnConflict(IconDB.TABLE_NAME, null, values,
-                SQLiteDatabase.CONFLICT_REPLACE);
+        insertWithOnConflictToDB(values);
     }
 
     @Thunk ContentValues updateCacheAndGetContentValues(LauncherActivityInfoCompat app,
@@ -711,19 +715,42 @@ public class IconCache {
                 label, Color.TRANSPARENT);
         values.put(IconDB.COLUMN_COMPONENT, componentName.flattenToString());
         values.put(IconDB.COLUMN_USER, userSerial);
-        mIconDb.getWritableDatabase().insertWithOnConflict(IconDB.TABLE_NAME, null, values,
-                SQLiteDatabase.CONFLICT_REPLACE);
+        insertWithOnConflictToDB(values);
+    }
+
+    private void insertWithOnConflictToDB(ContentValues values){
+        // In extreme situation, such as internal storage is full, there will be
+        // SQLiteFullException: database or disk is full exception. Catch the exception
+        // to make the system stable.
+        try {
+            mIconDb.getWritableDatabase().insertWithOnConflict(IconDB.TABLE_NAME, null, values,
+                    SQLiteDatabase.CONFLICT_REPLACE);
+        } catch (SQLiteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void deleteFromDB(String whereClause, String[] whereArgs){
+        // In extreme situation, such as internal storage is full, there will be
+        // SQLiteFullException: database or disk is full exception. Catch the exception
+        // to make the system stable.
+        try {
+            mIconDb.getWritableDatabase().delete(IconDB.TABLE_NAME, whereClause, whereArgs);
+        } catch (SQLiteException e){
+            e.printStackTrace();
+        }
     }
 
     private boolean getEntryFromDB(ComponentKey cacheKey, CacheEntry entry, boolean lowRes) {
-        Cursor c = mIconDb.getReadableDatabase().query(IconDB.TABLE_NAME,
-                new String[] {lowRes ? IconDB.COLUMN_ICON_LOW_RES : IconDB.COLUMN_ICON,
-                        IconDB.COLUMN_LABEL},
-                IconDB.COLUMN_COMPONENT + " = ? AND " + IconDB.COLUMN_USER + " = ?",
-                new String[] {cacheKey.componentName.flattenToString(),
-                    Long.toString(mUserManager.getSerialNumberForUser(cacheKey.user))},
-                null, null, null);
+        Cursor c = null;
         try {
+            c = mIconDb.getReadableDatabase().query(IconDB.TABLE_NAME,
+                    new String[] {lowRes ? IconDB.COLUMN_ICON_LOW_RES : IconDB.COLUMN_ICON,
+                            IconDB.COLUMN_LABEL},
+                    IconDB.COLUMN_COMPONENT + " = ? AND " + IconDB.COLUMN_USER + " = ?",
+                    new String[] {cacheKey.componentName.flattenToString(),
+                            Long.toString(mUserManager.getSerialNumberForUser(cacheKey.user))},
+                    null, null, null);
             if (c.moveToNext()) {
                 entry.icon = loadIconNoResize(c, 0, lowRes ? mLowResOptions : null);
                 entry.isLowResIcon = lowRes;
@@ -737,8 +764,12 @@ public class IconCache {
                 }
                 return true;
             }
+        } catch (SQLiteException e) {
+            e.printStackTrace();
         } finally {
-            c.close();
+            if (c != null) {
+                c.close();
+            }
         }
         return false;
     }
