@@ -4025,7 +4025,8 @@ public class Workspace extends PagedView
                 ItemInfo info = (ItemInfo) dragView.getView().getTag();
                 final CellLayout cellLayout = mLauncher.getCellLayout(
                         info.container, info.screenId);
-                if (cellLayout != null) {
+                if (cellLayout != null
+                        && dragView.getType() != BatchArrangeDragView.BubbleTextViewType.FOLDER) {
                     cellLayout.onDropChild(dragView.getView());
                     markCellsAsOccupiedForView(dragView.getView());
                 }
